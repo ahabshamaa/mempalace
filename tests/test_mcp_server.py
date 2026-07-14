@@ -1637,11 +1637,12 @@ class TestWriteTools:
     def test_add_drawer_chunked_logical_id_not_fetchable_directly(
         self, monkeypatch, config, palace_path, kg
     ):
-        """Documented contract on the chunked path: ``tool_get_drawer``
-        and ``tool_delete_drawer`` against the returned logical
-        ``drawer_id`` report ``not found`` because no row is stored
-        under that id. Callers must iterate ``chunk_ids`` or query by
-        ``parent_drawer_id`` metadata."""
+        """Chunked-path contract: ``tool_get_drawer`` against the
+        returned logical ``drawer_id`` reassembles the chunks in
+        ``chunk_index`` order and returns the full verbatim content.
+        ``tool_delete_drawer`` against the logical id still reports
+        ``not found`` — no row is stored under that id; callers iterate
+        ``chunk_ids`` to delete."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -1650,19 +1651,62 @@ class TestWriteTools:
         result = tool_add_drawer(wing="w", room="r", content="P" * 4000)
         assert result["success"] is True and result["chunks"] > 1
 
-        # tool_get_drawer against logical id: not found.
+        # tool_get_drawer against logical id: reassembled full content.
         got_logical = tool_get_drawer(result["drawer_id"])
-        assert "error" in got_logical and "not found" in got_logical["error"].lower()
+        assert got_logical["drawer_id"] == result["drawer_id"]
+        assert got_logical["content"] == "P" * 4000
+        assert got_logical["chunks"] == result["chunks"]
+        assert got_logical["chunk_ids"] == result["chunk_ids"]
+        # Per-chunk bookkeeping fields describe a physical chunk, not
+        # the reassembled drawer — they must not leak into the response.
+        assert "chunk_index" not in got_logical["metadata"]
+        assert "parent_drawer_id" not in got_logical["metadata"]
 
         # tool_get_drawer against the first chunk id: found, full content slice.
         got_chunk = tool_get_drawer(result["chunk_ids"][0])
         assert got_chunk["content"] == "P" * config.chunk_size
         assert got_chunk["metadata"]["parent_drawer_id"] == result["drawer_id"]
+        assert "chunk_ids" not in got_chunk
 
-        # tool_delete_drawer against logical id: also not found.
+        # tool_delete_drawer against logical id: still not found.
         deleted_logical = tool_delete_drawer(result["drawer_id"])
         assert deleted_logical["success"] is False
         assert "not found" in deleted_logical["error"].lower()
+
+    def test_get_drawer_reassembles_chunks_in_index_order(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Reassembly must sort by ``chunk_index``, not rely on Chroma's
+        return order from a where-filtered get. Distinct per-chunk
+        content makes any misordering visible in the joined result."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer
+
+        # Distinct letter per chunk_size slice → order-sensitive content.
+        oversized = "".join(chr(ord("A") + i) * config.chunk_size for i in range(4))
+        result = tool_add_drawer(wing="w", room="r", content=oversized)
+        assert result["success"] is True and result["chunks"] == 4
+
+        got = tool_get_drawer(result["drawer_id"])
+        assert got["content"] == oversized
+        assert got["chunk_ids"] == sorted(got["chunk_ids"])
+
+    def test_get_drawer_unknown_id_still_not_found_after_chunk_fallback(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """An id matching neither a row nor any ``parent_drawer_id``
+        must still report not found — the chunk fallback must not turn
+        misses into empty-content successes."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer
+
+        tool_add_drawer(wing="w", room="r", content="R" * 4000)
+        got = tool_get_drawer("drawer_totally_absent")
+        assert "error" in got and "not found" in got["error"].lower()
 
 
 # ── KG Tools ────────────────────────────────────────────────────────────

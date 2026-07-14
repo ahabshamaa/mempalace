@@ -1424,11 +1424,11 @@ def tool_add_drawer(
     via a single batched upsert. Each chunk carries ``parent_drawer_id``
     linkage and ``chunk_index`` metadata so search can rejoin them. The
     returned ``drawer_id`` is the LOGICAL group handle on the chunked
-    path; physical drawer ids are in ``chunk_ids`` (#1539). To delete
-    or fetch the underlying drawers, iterate ``chunk_ids`` or query by
-    ``parent_drawer_id`` — ``tool_get_drawer(drawer_id)`` and
-    ``tool_delete_drawer(drawer_id)`` report "not found" on the chunked
-    path because no row is stored under the logical group id.
+    path; physical drawer ids are in ``chunk_ids`` (#1539).
+    ``tool_get_drawer(drawer_id)`` reassembles the chunks in order and
+    returns the full content. ``tool_delete_drawer(drawer_id)`` still
+    reports "not found" on the chunked path because no row is stored
+    under the logical group id — iterate ``chunk_ids`` to delete.
     """
     global _metadata_cache
     try:
@@ -1624,16 +1624,51 @@ def tool_sync(project_dir: str = None, wing: str = None, apply: bool = False):
 
 
 def tool_get_drawer(drawer_id: str):
-    """Fetch a single drawer by ID. Returns full content and metadata."""
+    """Fetch a single drawer by ID. Returns full content and metadata.
+
+    Chunked drawers (#1539) store no row under the logical drawer_id —
+    only ``{drawer_id}_chunk_NNNNNN`` rows linked by ``parent_drawer_id``
+    metadata. When the direct id lookup misses, fall back to a
+    ``parent_drawer_id`` query and reassemble the chunks in
+    ``chunk_index`` order, so the id that ``tool_add_drawer`` returned
+    is always fetchable. Fetching an individual chunk id still returns
+    that chunk verbatim via the direct path.
+    """
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
     try:
         result = col.get(ids=[drawer_id], include=["documents", "metadatas"])
-        if not result["ids"]:
-            return {"error": f"Drawer not found: {drawer_id}"}
-        meta = _safe_meta(result["metadatas"][0])
-        doc = result["documents"][0]
+        if result["ids"]:
+            meta = _safe_meta(result["metadatas"][0])
+            doc = result["documents"][0]
+            chunk_ids = None
+        else:
+            # Chunked path: no row under the logical id — reassemble
+            # from the chunk rows that carry it as parent_drawer_id.
+            chunked = col.get(
+                where={"parent_drawer_id": drawer_id},
+                include=["documents", "metadatas"],
+            )
+            if not chunked["ids"]:
+                return {"error": f"Drawer not found: {drawer_id}"}
+            # Chroma does not guarantee order on a where-filtered get;
+            # sort by chunk_index before joining. Chunks are sliced
+            # with no overlap, so concatenation is verbatim content.
+            ordered = sorted(
+                zip(chunked["ids"], chunked["metadatas"], chunked["documents"]),
+                key=lambda row: _safe_meta(row[1]).get("chunk_index", 0),
+            )
+            chunk_ids = [cid for cid, _m, _d in ordered]
+            doc = "".join(d for _cid, _m, d in ordered)
+            meta = _safe_meta(ordered[0][1])
+            # Per-chunk bookkeeping fields describe a physical chunk,
+            # not the reassembled drawer — drop them from the response.
+            meta = {
+                k: v
+                for k, v in meta.items()
+                if k not in ("chunk_index", "parent_drawer_id")
+            }
         # source_file is the absolute filesystem path written by the
         # miners. Reduce to its basename before handing it to the MCP
         # client — same threat model as the palace_path leak fix:
@@ -1643,13 +1678,17 @@ def tool_get_drawer(drawer_id: str):
         safe_meta = dict(meta) if meta else {}
         if safe_meta.get("source_file"):
             safe_meta["source_file"] = Path(safe_meta["source_file"]).name
-        return {
+        response = {
             "drawer_id": drawer_id,
             "content": doc,
             "wing": safe_meta.get("wing", ""),
             "room": safe_meta.get("room", ""),
             "metadata": safe_meta,
         }
+        if chunk_ids is not None:
+            response["chunks"] = len(chunk_ids)
+            response["chunk_ids"] = chunk_ids
+        return response
     except Exception as e:
         return {"error": str(e)}
 
