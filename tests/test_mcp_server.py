@@ -2923,6 +2923,23 @@ class TestStructuredErrors:
         monkeypatch.setenv("MEMPALACE_MCP_IDLE_HOURS", "not-a-float")
         assert mcp_server._mcp_idle_timeout_secs() == 0.0
 
+    def test_mcp_idle_hours_zero_disables_watchdog_entirely(self, monkeypatch):
+        """MEMPALACE_MCP_IDLE_HOURS=0 means DISABLED, not exit-immediately:
+        the timeout resolves to 0.0 and ``_start_idle_exit_watchdog``
+        returns without spawning the watchdog thread, so a Desktop-spawned
+        server survives arbitrary idle gaps."""
+        import threading
+
+        from mempalace import mcp_server
+
+        monkeypatch.setenv("MEMPALACE_MCP_IDLE_HOURS", "0")
+        assert mcp_server._mcp_idle_timeout_secs() == 0.0
+
+        before = {t.name for t in threading.enumerate()}
+        mcp_server._start_idle_exit_watchdog()
+        spawned = {t.name for t in threading.enumerate()} - before
+        assert "mcp-idle-watchdog" not in spawned
+
     def test_cache_thread_safe(self, tmp_path, monkeypatch):
         """Concurrent _get_kg() for the same path yields one instance."""
         import concurrent.futures
