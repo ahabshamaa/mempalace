@@ -41,6 +41,13 @@ Nothing leaves your machine unless you opt in.
 Architecture, concepts, and mining flows:
 [mempalaceofficial.com/concepts/the-palace](https://mempalaceofficial.com/concepts/the-palace.html).
 
+**This fork** (`block5-http-client`) replaces the embedded ChromaDB
+backend with a client/server split: one standalone `chroma run` server
+owns the palace directory and all MemPalace processes are thin HTTP
+clients with structured errors and hard timeouts. Topology, config, error
+contract, and operations runbook:
+[docs/chroma-client-server.md](docs/chroma-client-server.md).
+
 ---
 
 ## Install
