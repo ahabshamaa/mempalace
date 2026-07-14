@@ -1424,11 +1424,11 @@ def tool_add_drawer(
     via a single batched upsert. Each chunk carries ``parent_drawer_id``
     linkage and ``chunk_index`` metadata so search can rejoin them. The
     returned ``drawer_id`` is the LOGICAL group handle on the chunked
-    path; physical drawer ids are in ``chunk_ids`` (#1539).
-    ``tool_get_drawer(drawer_id)`` reassembles the chunks in order and
-    returns the full content. ``tool_delete_drawer(drawer_id)`` still
-    reports "not found" on the chunked path because no row is stored
-    under the logical group id — iterate ``chunk_ids`` to delete.
+    path; physical drawer ids are in ``chunk_ids`` (#1539). The logical
+    id is a first-class handle: ``tool_get_drawer`` reassembles the
+    chunks in order, ``tool_delete_drawer`` removes them all, and
+    ``tool_update_drawer`` re-chunks new content / propagates metadata
+    to every chunk.
     """
     global _metadata_cache
     try:
@@ -1553,14 +1553,42 @@ def tool_add_drawer(
 
 
 def tool_delete_drawer(drawer_id: str):
-    """Delete a single drawer by ID."""
+    """Delete a single drawer by ID.
+
+    Chunked drawers (#1539) store no row under the logical drawer_id —
+    only ``{drawer_id}_chunk_NNNNNN`` rows linked by ``parent_drawer_id``
+    metadata. When the direct id lookup misses, fall back to a
+    ``parent_drawer_id`` query and delete every chunk row, so the id
+    that ``tool_add_drawer`` returned is always deletable. Deleting an
+    individual chunk id still removes just that chunk via the direct
+    path.
+    """
     global _metadata_cache
     col = _get_collection()
     if not col:
         return _collection_error_or_no_palace()
     existing = col.get(ids=[drawer_id])
-    if not existing["ids"]:
-        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+    if existing["ids"]:
+        delete_ids = [drawer_id]
+        chunks_deleted = None
+    else:
+        chunked = col.get(where={"parent_drawer_id": drawer_id})
+        if not chunked["ids"]:
+            return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+        # Chroma does not guarantee order on a where-filtered get; sort
+        # by chunk_index so the audit-trail preview is deterministic
+        # (chunk 0 = the start of the drawer's content).
+        ordered = sorted(
+            zip(chunked["ids"], chunked["metadatas"], chunked["documents"]),
+            key=lambda row: _safe_meta(row[1]).get("chunk_index", 0),
+        )
+        existing = {
+            "ids": [cid for cid, _m, _d in ordered],
+            "metadatas": [m for _cid, m, _d in ordered],
+            "documents": [d for _cid, _m, d in ordered],
+        }
+        delete_ids = existing["ids"]
+        chunks_deleted = len(delete_ids)
 
     # Log the deletion with the content being removed for audit trail
     deleted_content = existing.get("documents", [""])[0] if existing.get("documents") else ""
@@ -1573,14 +1601,18 @@ def tool_delete_drawer(drawer_id: str):
             "drawer_id": drawer_id,
             "deleted_meta": deleted_meta,
             "content_preview": deleted_content[:200],
+            **({"chunks_deleted": chunks_deleted} if chunks_deleted is not None else {}),
         },
     )
 
     try:
-        col.delete(ids=[drawer_id])
+        col.delete(ids=delete_ids)
         _metadata_cache = None
         logger.info(f"Deleted drawer: {drawer_id}")
-        return {"success": True, "drawer_id": drawer_id}
+        response = {"success": True, "drawer_id": drawer_id}
+        if chunks_deleted is not None:
+            response["chunks_deleted"] = chunks_deleted
+        return response
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1753,7 +1785,20 @@ def tool_list_drawers(wing: str = None, room: str = None, limit: int = 20, offse
 
 
 def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, room: str = None):
-    """Update an existing drawer's content and/or metadata."""
+    """Update an existing drawer's content and/or metadata.
+
+    Chunked drawers (#1539) store no row under the logical drawer_id —
+    only ``{drawer_id}_chunk_NNNNNN`` rows linked by ``parent_drawer_id``
+    metadata. When the direct id lookup misses, fall back to a
+    ``parent_drawer_id`` query: metadata-only updates propagate the new
+    wing/room to every chunk row; content updates re-chunk the new
+    content exactly like a fresh ``tool_add_drawer`` (content at or
+    under ``chunk_size`` collapses back to a single row stored under
+    the logical id). New chunk rows are upserted before stale ones are
+    deleted so a failure mid-way never leaves the drawer contentless.
+    Updating an individual chunk id still edits just that row via the
+    direct path.
+    """
     global _metadata_cache
 
     if content is None and wing is None and room is None:
@@ -1763,12 +1808,31 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
     if not col:
         return _collection_error_or_no_palace()
     try:
+        chunk_rows = None  # (id, meta) pairs, chunk_index order; None = direct hit
         existing = col.get(ids=[drawer_id], include=["documents", "metadatas"])
-        if not existing["ids"]:
-            return {"success": False, "error": f"Drawer not found: {drawer_id}"}
-
-        old_meta = _safe_meta(existing["metadatas"][0])
-        old_doc = existing["documents"][0]
+        if existing["ids"]:
+            old_meta = _safe_meta(existing["metadatas"][0])
+            old_doc = existing["documents"][0]
+        else:
+            chunked = col.get(
+                where={"parent_drawer_id": drawer_id},
+                include=["documents", "metadatas"],
+            )
+            if not chunked["ids"]:
+                return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+            ordered = sorted(
+                zip(chunked["ids"], chunked["metadatas"], chunked["documents"]),
+                key=lambda row: _safe_meta(row[1]).get("chunk_index", 0),
+            )
+            chunk_rows = [(cid, _safe_meta(m)) for cid, m, _d in ordered]
+            old_doc = "".join(d for _cid, _m, d in ordered)
+            # Chunk bookkeeping fields belong to physical rows, not the
+            # logical drawer — strip them from the base metadata.
+            old_meta = {
+                k: v
+                for k, v in chunk_rows[0][1].items()
+                if k not in ("chunk_index", "parent_drawer_id")
+            }
 
         new_doc = old_doc
         if content is not None:
@@ -1799,24 +1863,73 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
                 "new_room": new_meta.get("room", ""),
                 "content_changed": content is not None,
                 "content_preview": new_doc[:200] if content is not None else None,
+                **({"chunks": len(chunk_rows)} if chunk_rows is not None else {}),
             },
         )
 
-        update_kwargs = {"ids": [drawer_id]}
-        if content is not None:
-            update_kwargs["documents"] = [new_doc]
-        update_kwargs["metadatas"] = [new_meta]
-        col.update(**update_kwargs)
-
-        _metadata_cache = None
-
-        logger.info(f"Updated drawer: {drawer_id}")
-        return {
+        response = {
             "success": True,
             "drawer_id": drawer_id,
             "wing": new_meta.get("wing", ""),
             "room": new_meta.get("room", ""),
         }
+
+        if chunk_rows is None:
+            # Direct hit (single-row drawer or an individual chunk id):
+            # in-place update, unchanged behavior.
+            update_kwargs = {"ids": [drawer_id]}
+            if content is not None:
+                update_kwargs["documents"] = [new_doc]
+            update_kwargs["metadatas"] = [new_meta]
+            col.update(**update_kwargs)
+        elif content is None:
+            # Metadata-only update on a chunked drawer: propagate the
+            # new wing/room to every chunk row, keeping each row's own
+            # chunk_index / parent_drawer_id linkage.
+            col.update(
+                ids=[cid for cid, _m in chunk_rows],
+                metadatas=[
+                    {**m, **new_meta, "chunk_index": m.get("chunk_index"),
+                     "parent_drawer_id": drawer_id}
+                    for _cid, m in chunk_rows
+                ],
+            )
+            response["chunks"] = len(chunk_rows)
+        else:
+            # Content update on a chunked drawer: re-chunk like a fresh
+            # add. Upsert the new rows first, then delete stale ones, so
+            # an interruption never leaves the drawer contentless.
+            chunk_size = _config.chunk_size
+            old_ids = [cid for cid, _m in chunk_rows]
+            if len(new_doc) <= chunk_size:
+                col.upsert(
+                    ids=[drawer_id],
+                    documents=[new_doc],
+                    metadatas=[{**new_meta, "chunk_index": 0}],
+                )
+                new_ids = [drawer_id]
+                response["chunks"] = 1
+            else:
+                new_ids = []
+                new_docs = []
+                new_metas = []
+                for i in range(0, len(new_doc), chunk_size):
+                    chunk_idx = i // chunk_size
+                    new_ids.append(f"{drawer_id}_chunk_{chunk_idx:06d}")
+                    new_docs.append(new_doc[i : i + chunk_size])
+                    new_metas.append(
+                        {**new_meta, "chunk_index": chunk_idx, "parent_drawer_id": drawer_id}
+                    )
+                col.upsert(ids=new_ids, documents=new_docs, metadatas=new_metas)
+                response["chunks"] = len(new_ids)
+            stale = [cid for cid in old_ids if cid not in set(new_ids)]
+            if stale:
+                col.delete(ids=stale)
+
+        _metadata_cache = None
+
+        logger.info(f"Updated drawer: {drawer_id}")
+        return response
     except Exception as e:
         return {"success": False, "error": str(e)}
 

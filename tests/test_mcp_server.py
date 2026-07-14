@@ -1637,12 +1637,11 @@ class TestWriteTools:
     def test_add_drawer_chunked_logical_id_not_fetchable_directly(
         self, monkeypatch, config, palace_path, kg
     ):
-        """Chunked-path contract: ``tool_get_drawer`` against the
-        returned logical ``drawer_id`` reassembles the chunks in
-        ``chunk_index`` order and returns the full verbatim content.
-        ``tool_delete_drawer`` against the logical id still reports
-        ``not found`` — no row is stored under that id; callers iterate
-        ``chunk_ids`` to delete."""
+        """Chunked-path contract: the logical ``drawer_id`` returned by
+        ``tool_add_drawer`` is a first-class handle. ``tool_get_drawer``
+        reassembles the chunks in ``chunk_index`` order and returns the
+        full verbatim content; ``tool_delete_drawer`` removes every
+        chunk row."""
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
@@ -1668,10 +1667,13 @@ class TestWriteTools:
         assert got_chunk["metadata"]["parent_drawer_id"] == result["drawer_id"]
         assert "chunk_ids" not in got_chunk
 
-        # tool_delete_drawer against logical id: still not found.
+        # tool_delete_drawer against logical id: removes every chunk row.
         deleted_logical = tool_delete_drawer(result["drawer_id"])
-        assert deleted_logical["success"] is False
-        assert "not found" in deleted_logical["error"].lower()
+        assert deleted_logical["success"] is True
+        assert deleted_logical["chunks_deleted"] == result["chunks"]
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == 0
 
     def test_get_drawer_reassembles_chunks_in_index_order(
         self, monkeypatch, config, palace_path, kg
@@ -1707,6 +1709,135 @@ class TestWriteTools:
         tool_add_drawer(wing="w", room="r", content="R" * 4000)
         got = tool_get_drawer("drawer_totally_absent")
         assert "error" in got and "not found" in got["error"].lower()
+
+    def test_delete_drawer_chunk_id_deletes_only_that_chunk(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Deleting an individual chunk id keeps the direct-path
+        contract: exactly that row goes, sibling chunks stay."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_delete_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="S" * 4000)
+        assert result["success"] is True and result["chunks"] > 1
+
+        deleted = tool_delete_drawer(result["chunk_ids"][0])
+        assert deleted["success"] is True
+        assert "chunks_deleted" not in deleted
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == result["chunks"] - 1
+        assert col.get(ids=[result["chunk_ids"][0]])["ids"] == []
+
+    def test_delete_drawer_unknown_id_still_not_found_after_chunk_fallback(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """An id matching neither a row nor any ``parent_drawer_id``
+        must still report not found on delete — the fallback must not
+        turn misses into no-op successes."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_delete_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="T" * 4000)
+        deleted = tool_delete_drawer("drawer_totally_absent")
+        assert deleted["success"] is False
+        assert "not found" in deleted["error"].lower()
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == result["chunks"]
+
+    def test_update_drawer_logical_id_rechunks_content(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Content update via the logical id re-chunks like a fresh add:
+        new chunk rows replace the old ones (including count changes)
+        and the reassembled content is the new text verbatim."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer, tool_update_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="U" * 4000)
+        assert result["success"] is True and result["chunks"] > 1
+
+        grown = "V" * 7000
+        updated = tool_update_drawer(result["drawer_id"], content=grown)
+        assert updated["success"] is True
+        assert updated["chunks"] == -(-7000 // config.chunk_size)
+
+        got = tool_get_drawer(result["drawer_id"])
+        assert got["content"] == grown
+        assert got["chunks"] == updated["chunks"]
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.count() == updated["chunks"]
+        max_doc = max(len(d) for d in col.get()["documents"])
+        assert max_doc <= config.chunk_size
+
+    def test_update_drawer_logical_id_shrink_collapses_to_single_row(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Shrinking a chunked drawer to content at or under chunk_size
+        collapses it to one row stored under the logical id — the same
+        layout a fresh small add produces — with no stale chunk rows."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer, tool_update_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="W" * 4000)
+        assert result["success"] is True and result["chunks"] > 1
+
+        updated = tool_update_drawer(result["drawer_id"], content="small now")
+        assert updated["success"] is True
+        assert updated["chunks"] == 1
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        assert col.get()["ids"] == [result["drawer_id"]]
+
+        got = tool_get_drawer(result["drawer_id"])
+        assert got["content"] == "small now"
+        assert "chunk_ids" not in got  # direct hit now, not reassembly
+
+    def test_update_drawer_logical_id_metadata_only_propagates_to_chunks(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        """Metadata-only update via the logical id rewrites wing/room on
+        every chunk row while preserving each row's chunk_index and
+        parent_drawer_id linkage and leaving content untouched."""
+        _patch_mcp_server(monkeypatch, config, kg)
+        _client, _col = _get_collection(palace_path, create=True)
+        del _client
+        from mempalace.mcp_server import tool_add_drawer, tool_get_drawer, tool_update_drawer
+
+        result = tool_add_drawer(wing="w", room="r", content="X" * 4000)
+        assert result["success"] is True and result["chunks"] > 1
+
+        updated = tool_update_drawer(result["drawer_id"], wing="w2", room="r2")
+        assert updated["success"] is True
+        assert updated["wing"] == "w2" and updated["room"] == "r2"
+        assert updated["chunks"] == result["chunks"]
+
+        _client2, col = _get_collection(palace_path)
+        del _client2
+        stored = col.get()
+        assert sorted(stored["ids"]) == sorted(result["chunk_ids"])
+        for meta in stored["metadatas"]:
+            assert meta["wing"] == "w2" and meta["room"] == "r2"
+            assert meta["parent_drawer_id"] == result["drawer_id"]
+            assert "chunk_index" in meta
+
+        got = tool_get_drawer(result["drawer_id"])
+        assert got["content"] == "X" * 4000
+        assert got["wing"] == "w2" and got["room"] == "r2"
 
 
 # ── KG Tools ────────────────────────────────────────────────────────────
