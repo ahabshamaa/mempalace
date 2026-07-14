@@ -17,6 +17,7 @@ from typing import Any, Optional
 import chromadb
 from chromadb.errors import NotFoundError as _ChromaNotFoundError
 
+from ..palace_client import backend_address, http_mode, make_http_client
 from .base import (
     BaseBackend,
     BaseCollection,
@@ -1847,6 +1848,19 @@ class ChromaBackend(BaseBackend):
 
             raise BackendClosedError("ChromaBackend has been closed")
 
+        if http_mode():
+            # Block 5: the standalone Chroma server owns the persist
+            # directory. Cache keyed on the server address — inode/mtime
+            # freshness is meaningless over HTTP (the server, not this
+            # process, sees on-disk rebuilds), and the embedded pre-open
+            # repair pass must never touch files a live server owns.
+            key = f"http://{backend_address()}"
+            cached = self._clients.get(key)
+            if cached is None:
+                cached = make_http_client()
+                self._clients[key] = cached
+            return cached
+
         cached = self._clients.get(palace_path)
         cached_inode, cached_mtime = self._freshness.get(palace_path, (0, 0.0))
         current_inode, current_mtime = self._db_stat(palace_path)
@@ -1958,6 +1972,12 @@ class ChromaBackend(BaseBackend):
         Quarantines HNSW segments on first open and after any detected
         disk change. See :attr:`_quarantined_paths` for the gate logic.
         """
+        if http_mode():
+            # Block 5: server-owned files — skip the embedded pre-open
+            # repair pass entirely (client-side repair against a live
+            # server's files is a corruption risk, and the server does
+            # its own segment management).
+            return make_http_client()
         ChromaBackend._prepare_palace_for_open(palace_path)
         return chromadb.PersistentClient(path=palace_path)
 

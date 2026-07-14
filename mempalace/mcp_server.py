@@ -73,6 +73,13 @@ from .backends.chroma import (  # noqa: E402
     hnsw_capacity_status,
 )
 from .backends import BackendMismatchError, PalaceRef, detect_backend_for_path  # noqa: E402
+from .palace_client import (  # noqa: E402
+    PalaceBackendUnreachableError,
+    PalaceOperationTimeoutError,
+    backend_address,
+    http_mode,
+    probe_backend,
+)
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
@@ -393,6 +400,16 @@ def _refresh_vector_disabled_flag() -> None:
         _vector_disabled_reason = ""
         _vector_capacity_status = None
         return
+    if http_mode():
+        # Block 5: over HTTP this process never loads HNSW segments, so the
+        # embedded-mode segfault the probe guards against (#1222) cannot
+        # happen here. Leaving the probe on would let a client-side reading
+        # of the server's live files wrongly route search to the BM25
+        # fallback for divergence the server already handles itself.
+        _vector_disabled = False
+        _vector_disabled_reason = ""
+        _vector_capacity_status = None
+        return
     try:
         info = hnsw_capacity_status(_config.palace_path, _config.collection_name)
     except Exception:
@@ -526,6 +543,15 @@ def _get_client():
         _metadata_cache_time
     if not _is_chroma_backend():
         raise RuntimeError("_get_client is only available for the Chroma backend")
+    if http_mode():
+        # Block 5: HTTP transport. The standalone Chroma server owns rebuild
+        # detection, so the inode/mtime reconnect logic below is meaningless
+        # here — worse, the server bumps chroma.sqlite3's mtime on every
+        # write, which would force a client rebuild on every call. Cache for
+        # the process lifetime; make_client() health-probes on construction.
+        if _client_cache is None:
+            _client_cache = ChromaBackend.make_client(_config.palace_path)
+        return _client_cache
     db_path = os.path.join(_config.palace_path, "chroma.sqlite3")
     try:
         st = os.stat(db_path)
@@ -744,6 +770,30 @@ def _get_collection(create=False):
                 _metadata_cache = None
                 _metadata_cache_time = 0
             return _collection_cache
+        except (PalaceBackendUnreachableError, PalaceOperationTimeoutError) as exc:
+            # Block 5: structured, non-retried error — the health probe /
+            # operation timeout already bounded the wait; a second attempt
+            # would just double it. The bridge gets a clean error, never
+            # a hang.
+            logger.error("palace backend error: %s", exc)
+            _collection_open_error = {
+                "error": "Palace backend unreachable"
+                if isinstance(exc, PalaceBackendUnreachableError)
+                else "Palace operation timeout",
+                "details": str(exc),
+                "hint": (
+                    f"Check the Chroma server: curl http://{backend_address()}"
+                    "/api/v2/heartbeat ; launchd (com.ahab.chroma-server) "
+                    "should respawn it within seconds."
+                ),
+            }
+            _client_cache = None
+            _collection_cache = None
+            _collection_cache_backend = None
+            _collection_cache_palace = None
+            _metadata_cache = None
+            _metadata_cache_time = 0
+            return None
         except (BackendMismatchError, KeyError) as exc:
             _collection_open_error = {
                 "error": "Backend mismatch"
@@ -3170,6 +3220,20 @@ def main():
             except (AttributeError, OSError):
                 pass
     logger.info("MemPalace MCP Server starting...")
+    # Block 5: startup health probe against the standalone Chroma server.
+    # Non-fatal — the server keeps running and every tool returns the
+    # structured unreachable error until launchd brings the backend back.
+    if http_mode():
+        try:
+            probe_backend()
+            logger.info("Palace backend reachable at %s", backend_address())
+        except PalaceBackendUnreachableError as exc:
+            logger.error(
+                "%s — tools will return structured errors until the Chroma "
+                "server is back (launchd com.ahab.chroma-server should "
+                "respawn it).",
+                exc,
+            )
     # Pre-flight: probe HNSW capacity before any tool call so the warning
     # is visible at startup rather than on first use (#1222). Pure
     # filesystem read; never opens a chromadb client.
