@@ -80,6 +80,7 @@ from .palace_client import (  # noqa: E402
     http_mode,
     probe_backend,
 )
+from .instance_guard import PalaceInstanceBusy, register_instance  # noqa: E402
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
@@ -3372,6 +3373,18 @@ def main():
             except (AttributeError, OSError):
                 pass
     logger.info("MemPalace MCP Server starting...")
+    # Instance guard (2026-07-30 stray-instance outage): register in the
+    # per-palace PID registry. In embedded mode the palace files have at
+    # most one owner — a second instance is the two-writer corruption
+    # topology Block 5 removed — so live contention is fatal. In HTTP mode
+    # N thin clients are supported (CC per-session + Desktop app-lifecycle);
+    # live peers are logged for stray-instance triage. The handle's atexit
+    # hook removes the lockfile; dead holders are reaped by liveness check.
+    try:
+        register_instance(_config.palace_path, exclusive=not http_mode())
+    except PalaceInstanceBusy as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
     # Block 5: startup health probe against the standalone Chroma server.
     # Non-fatal — the server keeps running and every tool returns the
     # structured unreachable error until launchd brings the backend back.

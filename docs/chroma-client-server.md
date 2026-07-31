@@ -92,6 +92,27 @@ within seconds if it crashes or is killed. Clients need no action: the MCP
 server health-probes on construction and returns structured errors until
 the backend is back, then reconnects on the next call.
 
+**Stray / second mcp_server instance** (incident 2026-07-30: a stray
+foreground `mempalace-mcp` contending with Claude Desktop's instance took
+chat-side MemPalace down until the stray exited):
+
+```bash
+ps aux | grep -E "mempalace|mcp_server" | grep -v grep
+```
+
+Expected steady state: one `chroma run` (the only file owner), plus one
+thin-client `mcp_server` per host — Claude Desktop's for the app
+lifetime and one per live Claude Code session. Anything launched by hand
+in a terminal is a stray; kill it. Since the instance guard
+([`mempalace/instance_guard.py`](../mempalace/instance_guard.py)), every
+server registers a PID lockfile under
+`~/.mempalace/locks/mcp_instances_<key>/` at startup: in embedded mode a
+second instance refuses to start with an error naming the holding PID;
+in HTTP mode peers are supported and only logged (check the MCP server
+log for "Another mempalace-mcp instance is serving palace"). Lockfiles
+of dead holders are reaped automatically via process-liveness check, so
+a crashed server never blocks the next one.
+
 **Backup / restore**: back up with the server stopped (or accept a
 crash-consistent copy at your own risk):
 
