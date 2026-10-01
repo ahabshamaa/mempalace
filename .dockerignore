@@ -53,3 +53,7 @@ examples/
 tests/
 *.md
 !README.md
+
+# Fly deploy local artifacts
+deploy/fly/.local-run/
+deploy/fly/.venv/

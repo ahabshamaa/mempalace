@@ -27,7 +27,7 @@
         <key>HOME</key>
         <string>/Users/ahabshamaa</string>
         <key>MEMPALACE_FLY_APP</key>
-        <string>APP_NAME_PLACEHOLDER</string>
+        <string>mempalace-ahab</string>
     </dict>
     <key>StandardOutPath</key>
     <string>/Users/ahabshamaa/Library/Logs/mempalace-backup.launchd.log</string>

@@ -1,14 +1,14 @@
 # MemPalace remote MCP connector — one app, one machine, one volume.
 # Deploy from the repository root:
 #   fly deploy . -c deploy/fly/fly.toml --dockerfile deploy/fly/Dockerfile
-app = "APP_NAME_PLACEHOLDER"
+app = "mempalace-ahab"
 primary_region = "fra"
 
 [build]
   dockerfile = "Dockerfile"
 
 [env]
-  MEMPALACE_PUBLIC_URL = "https://APP_NAME_PLACEHOLDER.fly.dev"
+  MEMPALACE_PUBLIC_URL = "https://mempalace-ahab.fly.dev"
   # MEMPALACE_OAUTH_PASSPHRASE is a fly secret, never set here.
 
 [[mounts]]

@@ -6,7 +6,7 @@
 # Installed by launchd (com.ahab.mempalace-nightly-backup) at 03:30 local; RunAtLoad + a
 # "last success > 20h ago" guard covers nights the Mac was powered off (runs at next login).
 set -u
-APP="${MEMPALACE_FLY_APP:-APP_NAME_PLACEHOLDER}"
+APP="${MEMPALACE_FLY_APP:-mempalace-ahab}"
 DEST="$HOME/Backups/mempalace-nightly"
 LOG="$HOME/Library/Logs/mempalace-backup.log"
 KEEP="${KEEP:-14}"
