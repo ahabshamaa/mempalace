@@ -1,0 +1,46 @@
+# MemPalace remote MCP connector — one app, one machine, one volume.
+# Deploy from the repository root:
+#   fly deploy . -c deploy/fly/fly.toml --dockerfile deploy/fly/Dockerfile
+app = "APP_NAME_PLACEHOLDER"
+primary_region = "fra"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  MEMPALACE_PUBLIC_URL = "https://APP_NAME_PLACEHOLDER.fly.dev"
+  # MEMPALACE_OAUTH_PASSPHRASE is a fly secret, never set here.
+
+[[mounts]]
+  source = "mempalace_data"
+  destination = "/data"
+  initial_size = "5gb"
+  snapshot_retention = 60
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"     # always on: never cold-start the connector
+  auto_start_machines = false
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 50
+    hard_limit = 100
+
+  [[http_service.checks]]
+    grace_period = "90s"
+    interval = "30s"
+    method = "GET"
+    timeout = "5s"
+    path = "/health"
+
+[[vm]]
+  memory = "2gb"
+  cpu_kind = "shared"
+  cpus = 1
+
+[deploy]
+  strategy = "immediate"   # single machine + volume: no canary/rolling possible
