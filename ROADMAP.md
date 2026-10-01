@@ -1,6 +1,6 @@
 # MemPalace Roadmap
 
-## v3.1.1 — Stability Patch (this week)
+## v3.1.1 — Stability Patch
 
 Bug fixes and hardening merged to `develop`, releasing soon.
 
@@ -60,13 +60,36 @@ These are under consideration for v4 stable or later:
 - Multilingual embedding support (#488, #442)
 - Qdrant vector search backend (#381)
 
+## Block 5 — Fly.io HTTP Connector (In Progress)
+
+Parallel deployment infrastructure track enabling remote MCP server deployment on Fly.io. Complements v3.1.1 and v4.0 core development.
+
+**Shipped (2026-10-01):**
+- Deployment verification record (auth gate, migration drills, backup automation)
+- Snapshot restore drill script (automated validation baked into image)
+- Nightly backup single-instance locking (prevents concurrent export corruption)
+- Full Fly.io connector README (migration script, restore procedures, runbook)
+- Infrastructure setup (app name, region, build context)
+
+**In Progress:**
+- Operationalization & validation (Phase 2)
+- Staging deployment & E2E testing
+- Production hardening (failover, secrets rotation, monitoring)
+
+**Known Blockers:**
+- Fly.io account setup (paused at billing/org registration)
+- OAuth 2.1 credentials not yet obtained
+
+**Next Phase:** Complete account onboarding, deploy staging, run full E2E verification cycle.
+
 ## Branch Model
 
 ```
-main            ← tagged production releases
-develop         ← active development (PRs merge here)
-release/3.1     ← hotfixes for current stable (v3.1.x)
-release/3.0     ← hotfixes for prior stable
+main                    ← tagged production releases
+develop                 ← active development (PRs merge here)
+block5-http-client      ← Fly.io HTTP connector fork (parallel to main)
+release/3.1             ← hotfixes for current stable (v3.1.x)
+release/3.0             ← hotfixes for prior stable
 ```
 
 ## Contributing
