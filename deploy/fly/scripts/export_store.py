@@ -121,7 +121,7 @@ json.dump(manifest, open(os.path.join(work, "manifest.json"), "w"), indent=1)
 
 out_path = os.path.join(a.out, f"mempalace-export-{stamp}.tar.gz")
 tmp_path = out_path + ".part"
-with tarfile.open(tmp_path, "w:gz") as tar:
+with tarfile.open(tmp_path, "w:gz", compresslevel=1) as tar:
     tar.add(work, arcname=".")
 os.replace(tmp_path, out_path)
 shutil.rmtree(work, ignore_errors=True)

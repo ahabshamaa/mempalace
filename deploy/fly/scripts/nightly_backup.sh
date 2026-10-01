@@ -24,6 +24,12 @@ if [ "${FORCE:-0}" != "1" ] && [ -f "$STAMP_FILE" ]; then
   if [ $((now - last)) -lt 72000 ]; then log "skip: last success $(( (now - last) / 3600 ))h ago"; exit 0; fi
 fi
 
+# single-instance lock (launchd RunAtLoad and a manual run must never overlap)
+LOCK="$DEST/.lock"
+if ! mkdir "$LOCK" 2>/dev/null; then
+  if [ -n "$(find "$LOCK" -mmin +180 2>/dev/null)" ]; then rmdir "$LOCK" 2>/dev/null && mkdir "$LOCK"; else log "skip: another run holds $LOCK"; exit 0; fi
+fi
+trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 [ -x "$FLY" ] || fail "flyctl not found at $FLY"
 log "start (app=$APP)"
 remote_json=$("$FLY" ssh console -a "$APP" -C "python3 /app/scripts/export_store.py --out /data/export --keep 2" 2>>"$LOG") || fail "remote export failed (see log)"
