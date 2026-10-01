@@ -26,7 +26,7 @@ export MEMPALACE_MCP_IDLE_HOURS=0 ANONYMIZED_TELEMETRY=False
 "$HERE/.venv/bin/chroma" run --path "$MP/palace" --host 127.0.0.1 --port 8899 >"$SCRATCH/chroma.log" 2>&1 &
 CH=$!
 for _ in $(seq 1 60); do curl -fsS -m 2 http://127.0.0.1:8899/api/v2/heartbeat >/dev/null 2>&1 && break; sleep 1; done
-(cd "$HERE" && "$HERE/.venv/bin/uvicorn" server.app:app --host 127.0.0.1 --port 8080 --log-level info >"$SCRATCH/app.log" 2>&1) &
+(cd "$HERE" && exec "$HERE/.venv/bin/uvicorn" server.app:app --host 127.0.0.1 --port 8080 --log-level info >"$SCRATCH/app.log" 2>&1) &
 AP=$!
 for _ in $(seq 1 90); do curl -fsS -m 2 http://127.0.0.1:8080/health >/dev/null 2>&1 && break; sleep 1; done
 echo "chroma pid $CH, app pid $AP, scratch $SCRATCH"
