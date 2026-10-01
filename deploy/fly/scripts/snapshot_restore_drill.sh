@@ -7,19 +7,26 @@ set -euo pipefail
 SNAP="$1"; EXPECT="$2"; SAMPLES="${3:-}"; APP="${MEMPALACE_FLY_APP:-mempalace-ahab}"; REGION="${MEMPALACE_FLY_REGION:-fra}"
 IMAGE=$(fly status -a "$APP" --json | python3 -c 'import sys,json; d=json.load(sys.stdin); print(d["Machines"][0]["image_ref"]["registry"]+"/"+d["Machines"][0]["image_ref"]["repository"]+":"+d["Machines"][0]["image_ref"]["tag"])')
 echo "[drill] image $IMAGE"
-VOL=$(fly volumes create mempalace_drill -a "$APP" -r "$REGION" -s 5 --snapshot-id "$SNAP" --snapshot-retention 1 -y --json | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+VOL=$(fly volumes create mempalace_drill -a "$APP" -r "$REGION" -s 5 --snapshot-id "$SNAP" --snapshot-retention 1 -y 2>&1 | awk '/^ *ID:/{print $2}')
+[ -n "$VOL" ] || { echo "[drill] volume creation failed"; exit 1; }
 echo "[drill] volume $VOL created from $SNAP"
 cleanup() { echo "[drill] cleanup"; [ -n "${MID:-}" ] && fly machine destroy "$MID" -a "$APP" --force >/dev/null 2>&1 || true; sleep 3; fly volumes destroy "$VOL" -a "$APP" -y >/dev/null 2>&1 || true; }
 trap cleanup EXIT
-MID=$(fly machine run "$IMAGE" -a "$APP" -r "$REGION" --name mempalace-drill --volume "$VOL:/data" --vm-memory 2048 --vm-cpu-kind shared --vm-cpus 1 --autostop=off --json 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)["id"])')
+MID=$(fly machine run "$IMAGE" -a "$APP" -r "$REGION" --name mempalace-drill --volume "$VOL:/data" --vm-memory 2048 --vm-cpu-kind shared --vm-cpus 1 --autostop=off 2>&1 | awk '/Machine ID:/{print $3}')
+[ -n "$MID" ] || { echo "[drill] machine launch failed"; exit 1; }
 echo "[drill] machine $MID started; waiting for chroma"
 for _ in $(seq 1 40); do
   if fly ssh console -a "$APP" --machine "$MID" -C "curl -fsS -m 2 http://127.0.0.1:8801/api/v2/heartbeat" >/dev/null 2>&1; then break; fi; sleep 3
 done
 echo "[drill] verifying inside the drill machine"
 VERIFY="/app/scripts/verify_store.py"; fly ssh console -a "$APP" --machine "$MID" -C "test -f $VERIFY" >/dev/null 2>&1 || VERIFY="/data/import/baseline.py"
-SAMPLE_ARG=""; [ -n "$SAMPLES" ] && SAMPLE_ARG="/data/import/sample_ids.json"
-fly ssh console -a "$APP" --machine "$MID" -C "sh -c 'MEMPALACE_CHROMA_MODE=http CHROMA_PORT=8801 python3 $VERIFY 127.0.0.1 8801 /data/mempalace/knowledge_graph.sqlite3 /data/mempalace /tmp/drill-baseline.json $SAMPLE_ARG >/dev/null 2>&1; cat /tmp/drill-baseline.json'" 2>/dev/null | grep -v Connecting > /tmp/drill-baseline.json
+SAMPLE_ARG=""
+if [ -n "$SAMPLES" ]; then
+  # sample ids travel as a JSON literal so no upload to the drill machine is needed
+  SAMPLE_ARG="/tmp/sample_ids.json"; SAMPLE_JSON=$(python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))))' "$SAMPLES")
+  fly ssh console -a "$APP" --machine "$MID" -C "sh -c \"printf '%s' '$SAMPLE_JSON' > /tmp/sample_ids.json\"" >/dev/null 2>&1
+fi
+fly ssh console -a "$APP" --machine "$MID" -C "sh -c 'MEMPALACE_CHROMA_MODE=http CHROMA_PORT=8801 python3 $VERIFY 127.0.0.1 8801 /data/mempalace/knowledge_graph.sqlite3 /data/mempalace /tmp/drill-baseline.json $SAMPLE_ARG >/dev/null 2>&1; cat /tmp/drill-baseline.json'" 2>&1 | grep -v "^Connecting" > /tmp/drill-baseline.json
 python3 - "$EXPECT" /tmp/drill-baseline.json <<'PY'
 import json, sys
 a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))

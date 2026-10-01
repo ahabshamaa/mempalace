@@ -114,3 +114,24 @@ fly ssh console -a mempalace-ahab            # shell on the machine (/app, /data
 fly secrets list -a mempalace-ahab           # digests only
 curl -s https://mempalace-ahab.fly.dev/health
 ```
+
+## Verification record (2026-10-01)
+
+| Check | Result |
+|---|---|
+| Auth gate on the public URL (`tests/test_auth_gate.py`) | 12/12 pass: no token, wrong token, expired token (minted on the machine), token in query string, revoked token, wrong passphrase, bad PKCE, foreign redirect at DCR, unauthenticated surface = `/health` only |
+| Migration (`scripts/migrate_to_fly.sh`, restore into a fresh store) | 24,244 rows / 23,613 logical drawers / KG 39 entities + 23 triples; all 5 sample drawer hashes identical to the original baseline; content fingerprint equals the redacted baseline (`27e0b307…`); per-wing counts identical |
+| Tool round-trip (`tests/test_roundtrip.py`), 30 tools | pass (≈3 min on the shared CPU) |
+| Concurrent writes, two OAuth clients × 8 drawers (`tests/test_concurrent.py`) | pass, 16 distinct ids, all readable |
+| MCP Inspector CLI against the public URL | `tools/list` → 30 tools; `tools/call mempalace_status` OK |
+| Machine restart | data persisted; steady-state RSS ≈ 110 MB Chroma + 90 MB wrapper (1.26 GB transiently during the bulk import) |
+| Restore drill from Fly snapshot `vs_ggJMGDD3mJ45F3Nxqg2gPRx` (temporary machine + volume, then destroyed) | rows, logical drawers, fingerprint, 5 sample hashes all match |
+| Nightly Mac backup, first run (`FORCE=1 scripts/nightly_backup.sh`) | 63 MB export in 2 min 40 s, manifest hashes verified, `~/Backups/mempalace-nightly/mempalace-export-20261001T140828Z.tar.gz` |
+| Restore drill from that nightly export into a scratch Chroma | rows, logical drawers, fingerprint, 5 sample hashes all match; `oauth.sqlite3` restored too |
+
+Notes
+- Secrets scan before migration: 11 drawers / 16 values redacted as `[REDACTED:<type>]` (anthropic-api-key ×4, bearer-token ×4, env-secret-assignment ×7, google-oauth-client-secret ×1). The local store and the cold backup are untouched; reports (types and drawer ids only) live in `~/Backups/mempalace-2026-10-01/migration/`.
+- 39 rows in the source palace had no vector and could not be fetched by id (Chroma `Error finding id`); the logical restore re-embedded them, so the hosted store is the first copy where they are searchable. The disabled local store still has the defect.
+- The round-trip tests add then invalidate one KG triple; KG rows grow by 2 entities + 1 triple per run (invalidation keeps history). Expect 41/24 after the first run.
+- The nightly export includes `oauth.sqlite3` (hashed tokens only) so a restore keeps every device logged in.
+- Fly account 2FA: the account was created with GitHub/Google SSO, so 2FA is the identity provider's; Fly's own TOTP needs an email/password login added in https://fly.io/user/settings.
